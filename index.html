@@ -36,14 +36,14 @@
         <span class="line"><span>o tabuleiro.</span></span>
       </h1>
       <p class="lede">
-        Seu adversário é <strong>Nimbus</strong>, um espírito que muda de humor com o tempo lá fora.
-        Digite seus lances em notação algébrica. Se a memória falhar, segure o olho.
+        Enfrente <strong>Nimbus</strong>, um espírito que muda de humor com o tempo lá fora,
+        ou crie uma <strong>sala</strong> e chame um amigo. Lances em notação algébrica. Se a memória falhar, segure o olho.
       </p>
       <div class="meta">
         <div><span class="k">Você</span><span class="v" id="meta-color">Brancas</span></div>
         <div><span class="k">Lance</span><span class="v" id="meta-move">1</span></div>
-        <div><span class="k">Nível</span><span class="v" id="meta-level">2 / 3</span></div>
-        <div><span class="k">Motor</span><span class="v" id="meta-engine">Stockfish</span></div>
+        <div><span class="k" id="meta-level-k">Nível</span><span class="v" id="meta-level">2 / 3</span></div>
+        <div><span class="k">Adversário</span><span class="v" id="meta-engine">Stockfish</span></div>
       </div>
     </section>
 
@@ -51,7 +51,7 @@
       <div class="chat-head">
         <div class="avatar" aria-hidden="true">♞</div>
         <div>
-          <div class="chat-name">Nimbus</div>
+          <div class="chat-name" id="chat-name">Nimbus</div>
           <div class="chat-status" id="status">aguardando seu lance</div>
         </div>
         <button class="eye" id="eye" type="button" aria-label="Segure para ver o tabuleiro" title="Segure para ver o tabuleiro">
@@ -73,6 +73,8 @@
         </button>
       </form>
       <div class="chips" id="chips">
+        <button type="button" data-cmd="/criar" class="hot">/criar sala</button>
+        <button type="button" data-fill="/entrar ">/entrar</button>
         <button type="button" data-cmd="/ajuda">/ajuda</button>
         <button type="button" data-cmd="/novo">/novo</button>
         <button type="button" data-cmd="/pretas">/pretas</button>
@@ -89,6 +91,7 @@
   <footer class="foot">
     <span>Clima por <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a></span>
     <span>Lances por <a href="https://stockfish.online" target="_blank" rel="noopener">Stockfish Online</a></span>
+    <span>Salas por <a href="https://peerjs.com" target="_blank" rel="noopener">PeerJS</a></span>
     <span class="hint">Segure <kbd>Espaço</kbd> fora do chat ou o olho para espiar</span>
   </footer>
 
@@ -99,6 +102,7 @@
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

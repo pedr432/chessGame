@@ -13,19 +13,31 @@ const game = new Chess();
 let playerColor = "w";
 let level = 2;
 let thinking = false;
+let resigned = false;
+const isOver = () => resigned || game.isGameOver();
 let weather = { label: "céu desconhecido", mood: "neutral", temp: null, wind: null, city: "São Paulo" };
+
+// online rooms (PeerJS)
+const ROOM_PREFIX = "nimbus-xadrez-sala-";
+let mode = "bot"; // "bot" | "online"
+let peer = null;
+let conn = null;
+let isHost = false;
+let roomCode = null;
+let myName = "Você";
+let friendName = "Amigo";
 
 const PIECES = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
 
 /* ---------------- weather (Open-Meteo) ---------------- */
 const MOODS = {
-  clear: { accent: "#ffb547", accent2: "#ff6a3d", words: ["céu limpo", "limpo"] },
-  cloud: { accent: "#a9bccd", accent2: "#5f7488", words: ["nublado"] },
-  fog: { accent: "#c9c1ad", accent2: "#7a7466", words: ["neblina"] },
-  rain: { accent: "#62b6e8", accent2: "#2f5fd0", words: ["chuva"] },
-  snow: { accent: "#e2ecf7", accent2: "#8fb3d9", words: ["neve"] },
-  storm: { accent: "#b98cff", accent2: "#ff4f8b", words: ["tempestade"] },
-  night: { accent: "#8fa0ff", accent2: "#3a2f8f", words: ["noite"] },
+  clear: { accent: "#ffb547", accent2: "#ff6a3d" },
+  cloud: { accent: "#a9bccd", accent2: "#5f7488" },
+  fog: { accent: "#c9c1ad", accent2: "#7a7466" },
+  rain: { accent: "#62b6e8", accent2: "#2f5fd0" },
+  snow: { accent: "#e2ecf7", accent2: "#8fb3d9" },
+  storm: { accent: "#b98cff", accent2: "#ff4f8b" },
+  night: { accent: "#8fa0ff", accent2: "#3a2f8f" },
 };
 
 function decodeWmo(code) {
@@ -100,9 +112,10 @@ function addMsg(kind, html, extra = "") {
   messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
   return li;
 }
-const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const bot = (t, extra) => addMsg("bot", t, extra);
 const sys = (t) => addMsg("sys", t);
+const peerMsg = (t) => addMsg("peer", `<span class="who">${esc(friendName)}</span>${t}`);
 const san = (s) => `<span class="san">${esc(s)}</span>`;
 
 function setStatus(text, isThinking = false) {
@@ -110,11 +123,27 @@ function setStatus(text, isThinking = false) {
   statusEl.classList.toggle("thinking", isThinking);
 }
 
+function turnStatus() {
+  if (isOver()) return setStatus("partida encerrada");
+  if (mode === "online" && !conn?.open) return setStatus(isHost ? `sala ${roomCode} · esperando amigo` : "conectando…", true);
+  if (game.turn() === playerColor) return setStatus("sua vez");
+  setStatus(mode === "online" ? `vez de ${friendName}` : "Nimbus está pensando", true);
+}
+
 function updateMeta() {
   $("#meta-color").textContent = playerColor === "w" ? "Brancas" : "Pretas";
   $("#meta-move").textContent = Math.floor(game.history().length / 2) + 1;
-  $("#meta-level").textContent = `${level} / 3`;
-  $("#meta-engine").textContent = level === 1 ? "Local" : "Stockfish";
+  if (mode === "online") {
+    $("#meta-level-k").textContent = "Sala";
+    $("#meta-level").textContent = roomCode || "—";
+    $("#meta-engine").textContent = conn?.open ? friendName : "Aguardando";
+    $("#chat-name").textContent = conn?.open ? `${friendName} · sala ${roomCode}` : `Sala ${roomCode || ""}`;
+  } else {
+    $("#meta-level-k").textContent = "Nível";
+    $("#meta-level").textContent = `${level} / 3`;
+    $("#meta-engine").textContent = level === 1 ? "Local" : "Stockfish";
+    $("#chat-name").textContent = "Nimbus";
+  }
   updateMarquee();
   if (reveal.classList.contains("open")) renderBoard();
 }
@@ -129,13 +158,15 @@ function updateMarquee() {
     }
     items = items.slice(-10);
   } else {
-    items = ["Xadrez <i>às cegas</i>", "Notação <i>algébrica</i>", "Segure o <i>olho</i>", "Nimbus <i>sente o clima</i>"];
+    items = ["Xadrez <i>às cegas</i>", "Notação <i>algébrica</i>", "Segure o <i>olho</i>", "Crie uma <i>sala</i>", "Nimbus <i>sente o clima</i>"];
   }
   const row = items.map((t) => `<span>${t} <b>✦</b></span>`).join("");
   $("#track").innerHTML = row + row + row + row;
 }
 
 /* ---------------- game flow ---------------- */
+const SAN_LIKE = /^(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=?[QRBNqrbn])?|[O0]-[O0](?:-[O0])?|[a-h][1-8][a-h][1-8][qrbn]?)[+#]?[!?]*$/;
+
 function normalize(raw) {
   let s = raw.trim().replace(/0-0-0/g, "O-O-O").replace(/0-0/g, "O-O").replace(/[!?]+$/, "");
   if (/^[a-h][1-8][a-h][1-8][qrbn]?$/i.test(s)) return { from: s.slice(0, 2).toLowerCase(), to: s.slice(2, 4).toLowerCase(), promotion: (s[4] || "q").toLowerCase() };
@@ -146,9 +177,15 @@ function tryMove(raw) {
   try { return game.move(normalize(raw)); } catch { return null; }
 }
 
+function moveLabel(move) {
+  const n = Math.ceil(game.history().length / 2);
+  return `${move.color === "w" ? `${n}.` : `${n}…`} ${san(move.san)}`;
+}
+
 function describeEnd() {
   if (game.isCheckmate()) {
     const loserIsPlayer = game.turn() === playerColor;
+    if (mode === "online") return loserIsPlayer ? `Xeque-mate. ${friendName} venceu. /novo para revanche.` : `Xeque-mate! Você venceu ${friendName}. /novo para revanche.`;
     return loserIsPlayer ? "Xeque-mate. O céu venceu desta vez. Digite /novo para revanche." : "Xeque-mate! Você venceu Nimbus. As nuvens se abrem. /novo para jogar de novo.";
   }
   if (game.isStalemate()) return "Afogamento. Empate — como um dia sem vento.";
@@ -158,8 +195,16 @@ function describeEnd() {
   return null;
 }
 
+function afterMove() {
+  updateMeta();
+  const end = describeEnd();
+  if (end) sys(end);
+  turnStatus();
+  return !!end;
+}
+
 async function engineMove() {
-  if (game.isGameOver()) return;
+  if (game.isGameOver() || mode !== "bot") return;
   thinking = true;
   setStatus("Nimbus está pensando", true);
   const start = performance.now();
@@ -174,10 +219,11 @@ async function engineMove() {
       clearTimeout(t);
       const data = await res.json();
       const uci = data.success && data.bestmove ? data.bestmove.split(" ")[1] : null;
-      if (uci) move = game.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] || "q" });
+      if (uci && mode === "bot") move = game.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] || "q" });
     } catch { /* fallback below */ }
     if (!move) $("#meta-engine").textContent = "Local";
   }
+  if (mode !== "bot") { thinking = false; return; }
   if (!move) {
     await new Promise((r) => setTimeout(r, 30));
     move = game.move(localBestMove(game, level === 1 ? 2 : 3));
@@ -187,79 +233,120 @@ async function engineMove() {
   if (elapsed < 700) await new Promise((r) => setTimeout(r, 700 - elapsed));
 
   thinking = false;
-  const num = move.color === "w" ? `${Math.ceil(game.history().length / 2)}.` : `${Math.ceil(game.history().length / 2)}…`;
-  let text = `${num} ${san(move.san)}`;
+  let text = moveLabel(move);
   if (move.san.includes("#")) text += "  — mate.";
   else if (move.san.includes("+")) text += "  — xeque.";
   else if (move.captured) text += Math.random() < 0.5 ? "  — obrigado pela peça." : "";
   else if (Math.random() < 0.18) text += `\n${moodQuip()}`;
   bot(text);
-  updateMeta();
-  const end = describeEnd();
-  if (end) { sys(end); setStatus("partida encerrada"); } else setStatus("sua vez");
+  afterMove();
+}
+
+function invalidMove(text) {
+  const legal = game.moves();
+  const sample = legal.sort(() => Math.random() - 0.5).slice(0, 5).map((m) => `<code>${esc(m)}</code>`).join(" ");
+  bot(`Lance inválido: <code>${esc(text)}</code>. ${game.inCheck() ? "Você está em xeque. " : ""}Alguns lances legais: ${sample}`, "error");
 }
 
 async function handleInput(raw) {
   const text = raw.trim();
   if (!text) return;
-  addMsg("me", text.startsWith("/") ? esc(text) : san(text));
-  if (text.startsWith("/")) return command(text.toLowerCase());
+  const isCmd = text.startsWith("/");
+  const looksLikeMove = SAN_LIKE.test(text);
+  addMsg("me", isCmd || !looksLikeMove ? esc(text) : san(text));
+  if (isCmd) return command(text);
+  if (mode === "online") return onlineInput(text, looksLikeMove);
+
   if (thinking) return bot("Calma. Ainda estou olhando as nuvens.");
-  if (game.isGameOver()) return bot("A partida acabou. Digite /novo.");
+  if (isOver()) return bot("A partida acabou. Digite /novo.");
   if (game.turn() !== playerColor) return bot("Não é a sua vez.");
 
   const move = tryMove(text);
-  if (!move) {
-    const legal = game.moves();
-    const sample = legal.sort(() => Math.random() - 0.5).slice(0, 5).map((m) => `<code>${esc(m)}</code>`).join(" ");
-    return bot(`Lance inválido: <code>${esc(text)}</code>. ${game.inCheck() ? "Você está em xeque. " : ""}Alguns lances legais: ${sample}`, "error");
-  }
-  updateMeta();
-  const end = describeEnd();
-  if (end) { sys(end); setStatus("partida encerrada"); return; }
+  if (!move) return invalidMove(text);
+  if (afterMove()) return;
   await engineMove();
 }
 
 function newGame(color) {
+  if (mode === "online") leaveRoom(true);
   game.reset();
+  resigned = false;
   playerColor = color;
   messagesEl.innerHTML = "";
-  sys(`nova partida · você joga de ${color === "w" ? "brancas" : "pretas"} · nível ${level}`);
+  sys(`nova partida contra Nimbus · você joga de ${color === "w" ? "brancas" : "pretas"} · nível ${level}`);
   updateMeta();
   if (color === "b") {
     bot(`Eu começo. ${moodQuip()}`);
     engineMove();
   } else {
     bot(`Suas brancas. Faça o primeiro lance.`);
-    setStatus("sua vez");
+    turnStatus();
   }
 }
 
-function command(cmd) {
-  const [name, arg] = cmd.split(/\s+/);
+function command(raw) {
+  const [nameRaw, ...rest] = raw.split(/\s+/);
+  const name = nameRaw.toLowerCase();
+  const arg = rest.join(" ");
   switch (name) {
     case "/ajuda":
     case "/help":
       return bot(
         "Lances em notação algébrica: <code>e4</code> <code>Nf3</code> <code>Bxc6</code> <code>O-O</code> <code>e8=Q</code>\n" +
         "Peças: K rei · Q dama · R torre · B bispo · N cavalo. Também aceito <code>e2e4</code>.\n\n" +
-        "<code>/novo</code> nova partida de brancas\n<code>/pretas</code> nova partida de pretas\n" +
-        "<code>/desfazer</code> volta seu último lance\n<code>/nivel 1-3</code> força do adversário\n" +
-        "<code>/lances</code> lista seus lances legais\n<code>/pgn</code> partida até aqui\n\n" +
+        "<b>Jogar com um amigo</b>\n<code>/criar</code> cria uma sala e mostra o link\n<code>/entrar CÓDIGO</code> entra na sala do amigo\n" +
+        "<code>/nome Seu Nome</code> como o amigo te vê\n<code>/sair</code> sai da sala e volta para o Nimbus\n" +
+        "Na sala, qualquer texto que não for lance vira mensagem para o amigo.\n\n" +
+        "<b>Partida</b>\n<code>/novo</code> nova partida (na sala: revanche com cores trocadas)\n<code>/pretas</code> jogar de pretas contra o Nimbus\n" +
+        "<code>/desfazer</code> volta seu último lance (só contra o Nimbus)\n<code>/nivel 1-3</code> força do Nimbus\n" +
+        "<code>/desistir</code> abandona a partida\n<code>/lances</code> lista seus lances legais\n<code>/pgn</code> partida até aqui\n\n" +
         "Segure o olho (ou a tecla Espaço fora do campo de texto) para ver o tabuleiro."
       );
+    case "/criar":
+      return createRoom();
+    case "/entrar": {
+      const code = arg.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (!code) return bot("Use <code>/entrar CÓDIGO</code>, por exemplo <code>/entrar K7QXP</code>.");
+      return joinRoom(code);
+    }
+    case "/sair":
+      if (mode !== "online") return bot("Você não está em nenhuma sala.");
+      return newGame("w");
+    case "/nome": {
+      const n = arg.trim().slice(0, 24);
+      if (!n) return bot("Use <code>/nome Seu Nome</code>.");
+      myName = n;
+      try { localStorage.setItem("nimbus-name", n); } catch { /* ignore */ }
+      send({ type: "hello", name: myName, rename: true });
+      return bot(`Pronto, agora você é <b>${esc(n)}</b>.`);
+    }
     case "/novo":
     case "/brancas":
+      if (mode === "online") {
+        if (!conn?.open) return bot("Espere seu amigo entrar para começar.");
+        send({ type: "new" });
+        return rematch();
+      }
       return newGame("w");
     case "/pretas":
+      if (mode === "online") return bot("Na sala as cores alternam a cada revanche (<code>/novo</code>).");
       return newGame("b");
+    case "/desistir":
+      if (isOver()) return bot("A partida já acabou.");
+      if (mode === "online") {
+        send({ type: "resign" });
+        sys(`Você desistiu. ${friendName} vence. /novo para revanche.`);
+      } else sys("Você desistiu. Nimbus vence. /novo para jogar de novo.");
+      resigned = true;
+      return turnStatus();
     case "/desfazer":
+      if (mode === "online") return bot("Na sala não dá para desfazer lances.");
       if (thinking) return bot("Espere minha jogada.");
       if (game.history().length === 0) return bot("Nada para desfazer.");
       game.undo();
       if (game.turn() !== playerColor) game.undo();
       updateMeta();
-      setStatus("sua vez");
+      turnStatus();
       return bot("Voltei no tempo. Sua vez de novo.");
     case "/nivel":
     case "/nível": {
@@ -278,6 +365,187 @@ function command(cmd) {
   }
 }
 
+/* ---------------- online rooms ---------------- */
+function makeCode() {
+  const abc = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  return Array.from(crypto.getRandomValues(new Uint8Array(5)), (b) => abc[b % abc.length]).join("");
+}
+const roomLink = (code) => `${location.origin}${location.pathname}?sala=${code}`;
+
+function send(data) {
+  if (conn?.open) conn.send(data);
+}
+
+function leaveRoom(silent) {
+  try { conn?.close(); } catch { /* ignore */ }
+  try { peer?.destroy(); } catch { /* ignore */ }
+  conn = null; peer = null; roomCode = null; isHost = false;
+  mode = "bot";
+  history.replaceState(null, "", location.pathname);
+  if (!silent) sys("você saiu da sala");
+}
+
+function peerReady() {
+  if (typeof window.Peer !== "function") {
+    bot("Não consegui carregar o sistema de salas (PeerJS). Recarregue a página e tente de novo.", "error");
+    return false;
+  }
+  return true;
+}
+
+function startOnline(code, host) {
+  if (mode === "online") leaveRoom(true);
+  mode = "online";
+  isHost = host;
+  roomCode = code;
+  game.reset();
+  resigned = false;
+  friendName = "Amigo";
+  messagesEl.innerHTML = "";
+  playerColor = host ? "w" : "b";
+  // guests keep the invite in the URL so a reload rejoins; a reloading host must not join its own room
+  history.replaceState(null, "", host ? location.pathname : `?sala=${code}`);
+  updateMeta();
+  turnStatus();
+}
+
+function showRoomCard(code) {
+  const li = bot(
+    `<div class="room-card"><span>Sala criada. Mande este código ou link para seu amigo:</span>` +
+    `<span class="room-code">${esc(code)}</span><span class="room-link">${esc(roomLink(code))}</span>` +
+    `<button type="button" class="copy">copiar link</button></div>`
+  );
+  const btn = li.querySelector(".copy");
+  btn.addEventListener("click", () => {
+    navigator.clipboard?.writeText(roomLink(code)).then(
+      () => { btn.textContent = "link copiado"; },
+      () => { getSelection().selectAllChildren(li.querySelector(".room-link")); btn.textContent = "selecionado — Ctrl+C"; }
+    );
+  });
+}
+
+function createRoom(attempt = 0) {
+  if (!peerReady()) return;
+  const code = makeCode();
+  startOnline(code, true);
+  sys("criando sala…");
+  peer = new window.Peer(ROOM_PREFIX + code);
+  peer.on("open", () => {
+    showRoomCard(code);
+    bot("Você joga de <b>brancas</b>. Assim que seu amigo entrar, faça o primeiro lance.");
+    turnStatus();
+  });
+  peer.on("connection", (c) => {
+    if (conn?.open) { c.on("open", () => { c.send({ type: "full" }); setTimeout(() => c.close(), 500); }); return; }
+    wireConnection(c);
+  });
+  peer.on("error", (err) => {
+    if (err.type === "unavailable-id" && attempt < 3) { peer.destroy(); return createRoom(attempt + 1); }
+    peerError(err);
+  });
+  peer.on("disconnected", () => { if (peer && !peer.destroyed) peer.reconnect(); });
+}
+
+function joinRoom(code) {
+  if (!peerReady()) return;
+  startOnline(code, false);
+  sys(`entrando na sala ${code}…`);
+  peer = new window.Peer();
+  peer.on("open", () => wireConnection(peer.connect(ROOM_PREFIX + code, { reliable: true })));
+  peer.on("error", peerError);
+}
+
+function peerError(err) {
+  const msgs = {
+    "peer-unavailable": "Sala não encontrada. Confira o código ou peça para seu amigo criar outra com /criar.",
+    network: "Sem conexão com o servidor de salas. Verifique a internet.",
+    "server-error": "O servidor de salas não respondeu. Tente de novo em instantes.",
+    "browser-incompatible": "Este navegador não suporta salas online.",
+  };
+  bot(msgs[err.type] || `Erro na sala: ${esc(err.type || err.message)}`, "error");
+  setStatus("sem conexão");
+}
+
+function wireConnection(c) {
+  conn = c;
+  c.on("open", () => {
+    send({ type: "hello", name: myName });
+    if (isHost) send({ type: "state", moves: game.history(), hostColor: playerColor });
+    updateMeta();
+    turnStatus();
+  });
+  c.on("data", onPeerData);
+  c.on("close", () => {
+    if (conn !== c) return;
+    conn = null;
+    sys(`${friendName} saiu da sala.${isHost ? " A sala continua aberta; ele pode voltar pelo mesmo link." : ""}`);
+    updateMeta();
+    turnStatus();
+  });
+}
+
+function onPeerData(d) {
+  if (!d || typeof d !== "object") return;
+  switch (d.type) {
+    case "hello": {
+      let name = String(d.name || "Amigo").slice(0, 24);
+      if (name === "Você") name = "Amigo";
+      sys(d.rename ? `${friendName} agora se chama ${name}` : `${name} está na sala`);
+      friendName = name;
+      updateMeta();
+      return turnStatus();
+    }
+    case "state": {
+      game.reset();
+      for (const m of d.moves || []) { try { game.move(m); } catch { break; } }
+      playerColor = d.hostColor === "w" ? "b" : "w";
+      bot(`Você joga de <b>${playerColor === "w" ? "brancas" : "pretas"}</b>.` +
+        (game.history().length ? ` Partida em andamento: ${game.history().length} lances.` : "") +
+        " Digite lances ou converse — o que não for lance vira mensagem.");
+      return afterMove();
+    }
+    case "move": {
+      if (game.turn() === playerColor) return;
+      let move;
+      try { move = game.move(d.san); } catch { return; }
+      peerMsg(moveLabel(move));
+      return afterMove();
+    }
+    case "chat":
+      return peerMsg(esc(String(d.text).slice(0, 500)));
+    case "new":
+      return rematch();
+    case "resign":
+      sys(`${friendName} desistiu. Você vence! /novo para revanche.`);
+      resigned = true;
+      return turnStatus();
+    case "full":
+      bot("Essa sala já tem dois jogadores.", "error");
+      return leaveRoom(true);
+  }
+}
+
+function rematch() {
+  game.reset();
+  resigned = false;
+  playerColor = playerColor === "w" ? "b" : "w";
+  sys(`revanche · você joga de ${playerColor === "w" ? "brancas" : "pretas"}`);
+  updateMeta();
+  turnStatus();
+}
+
+function onlineInput(text, looksLikeMove) {
+  if (!conn?.open) return bot(isHost ? "Ainda estou esperando seu amigo entrar na sala." : "Ainda conectando à sala…");
+  if (!looksLikeMove) return send({ type: "chat", text });
+  if (isOver()) return bot("A partida acabou. /novo para revanche.");
+  if (game.turn() !== playerColor) return bot(`Não é a sua vez — ${friendName} está pensando.`);
+  const move = tryMove(text);
+  if (!move) return invalidMove(text);
+  send({ type: "move", san: move.san });
+  afterMove();
+}
+
+/* ---------------- composer ---------------- */
 $("#composer").addEventListener("submit", (e) => {
   e.preventDefault();
   const v = input.value;
@@ -285,8 +553,10 @@ $("#composer").addEventListener("submit", (e) => {
   handleInput(v);
 });
 $("#chips").addEventListener("click", (e) => {
-  const b = e.target.closest("button[data-cmd]");
-  if (b) handleInput(b.dataset.cmd);
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.fill) { input.value = b.dataset.fill; input.focus(); return; }
+  if (b.dataset.cmd) handleInput(b.dataset.cmd);
 });
 
 /* ---------------- board reveal ---------------- */
@@ -374,10 +644,18 @@ tick();
 setInterval(tick, 10000);
 
 /* ---------------- boot ---------------- */
+try { myName = localStorage.getItem("nimbus-name") || myName; } catch { /* ignore */ }
 updateMarquee();
-sys("nimbus está online");
-loadWeather(-23.55, -46.63, "São Paulo").then(() => {
-  bot(`Olá. Lá fora: ${weather.label}${weather.temp !== null ? `, ${weather.temp}°C` : ""}. ${moodQuip()}`);
-  bot("Você joga de brancas. Envie seu lance em notação algébrica — por exemplo <code>e4</code>. Digite <code>/ajuda</code> para os comandos.");
-  setStatus("sua vez");
-});
+const invite = new URLSearchParams(location.search).get("sala");
+const weatherReady = loadWeather(-23.55, -46.63, "São Paulo");
+if (invite) {
+  joinRoom(invite.toUpperCase().replace(/[^A-Z0-9]/g, ""));
+} else {
+  sys("nimbus está online");
+  weatherReady.then(() => {
+    if (mode !== "bot") return;
+    bot(`Olá. Lá fora: ${weather.label}${weather.temp !== null ? `, ${weather.temp}°C` : ""}. ${moodQuip()}`);
+    bot("Você joga de brancas contra mim. Envie seu lance em notação algébrica — por exemplo <code>e4</code>.\nQuer jogar com um amigo? Digite <code>/criar</code>. Comandos em <code>/ajuda</code>.");
+    turnStatus();
+  });
+}

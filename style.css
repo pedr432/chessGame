@@ -174,6 +174,14 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .chips { display: flex; gap: 8px; padding: 12px 14px 16px; overflow-x: auto; scrollbar-width: none; }
 .chips button { flex: none; font-family: var(--mono); font-size: 11.5px; color: var(--muted); padding: 6px 12px; border: 1px solid var(--line); border-radius: 99px; transition: color .2s, border-color .2s; }
 .chips button:hover { color: var(--ink); border-color: var(--accent); }
+.chips button.hot { color: var(--bg); background: var(--accent); border-color: var(--accent); }
+.msg .who { display: block; font-family: var(--mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin-bottom: 4px; }
+.msg.peer { align-self: flex-start; background: color-mix(in oklab, var(--accent) 12%, transparent); border: 1px solid color-mix(in oklab, var(--accent) 35%, transparent); border-bottom-left-radius: 6px; }
+.room-card { display: flex; flex-direction: column; gap: 10px; }
+.room-code { font-family: var(--serif); font-size: 44px; line-height: 1; letter-spacing: .08em; color: var(--accent); }
+.room-link { font-family: var(--mono); font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; user-select: all; }
+.copy { align-self: flex-start; font-family: var(--mono); font-size: 12px; padding: 7px 14px; border-radius: 99px; background: var(--ink); color: var(--bg); }
+.copy:focus-visible, .chips button:focus-visible, .eye:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
 /* ---------- marquee ---------- */
 .marquee { position: relative; z-index: 2; border-block: 1px solid var(--line); overflow: hidden; padding: 18px 0; }
